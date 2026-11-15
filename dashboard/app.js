@@ -1,4 +1,4 @@
-// Token Radar's dashboard, radar-3. It reads window.RADAR (written beside dashboard/ by main.ts)
+// Token Radar's dashboard, radar-4. It reads window.RADAR (written beside dashboard/ by main.ts)
 // and renders the ranked board, a filterable table, a per-protocol detail drawer with the comps
 // breakdown, the netted farm verdict and the protocol's farm plan, and a model sandbox that
 // re-ranks the board live from the same function that scored it. No network: every byte it
@@ -48,10 +48,17 @@
   }
 
   // --- the model, as in lib/model.ts ---------------------------------------
+  // Three phases: seasoning under 180 days (0.55 to 0.85), the launch window to
+  // 1095 days (0.85 to 1.0), then decay to 0.85 over the next 1095 days.
   function ageMultiplier(age, model) {
     var a = age === null || age === undefined ? model.unknown_age_days : age;
+    if (a <= model.seasoning_days) {
+      var f = Math.min(Math.max(a, 0), model.seasoning_days) / model.seasoning_days;
+      return model.seasoning_floor + f * (model.launch_floor - model.seasoning_floor);
+    }
     if (a <= model.maturity_days) {
-      return model.maturity_floor + (Math.min(Math.max(a, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+      var g = (a - model.seasoning_days) / (model.maturity_days - model.seasoning_days);
+      return model.launch_floor + g * (1 - model.launch_floor);
     }
     var over = Math.min((a - model.maturity_days) / model.maturity_days, 1);
     return 1 - model.age_decay * over;
@@ -76,7 +83,10 @@
     var base = row.comps_base_usd;
     if (!sb.group) base = base / Math.exp((DATA.comps.offsets[row.comps_group] || 0));
     var growth = Math.min(m.growth_cap, Math.max(m.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * sb.weight;
+    // The multiplier stops paying past +/-60%: a 7-day spike of thousands of percent is a
+    // new pool, not a proportionally better protocol.
+    var growthForMult = Math.min(m.growth_mult_cap, Math.max(-m.growth_mult_cap, growth));
+    var growthMult = 1 + (growthForMult / 100) * sb.weight;
     var maturity = ageMultiplier(row.age_days, m);
     var reach = sb.reach ? reachMultiplier(row, m) : 1;
     return {
@@ -391,17 +401,17 @@
     var m = DATA.model;
     var c = DATA.comps;
     var offsets = Object.keys(c.offsets).map(function (g) {
-      return g + ' ' + (c.offsets[g] >= 0 ? '+' : '') + c.offsets[g].toFixed(2) + ' (n=' + c.group_n[g] + ')';
+      return g + ' ' + (c.offsets[g] >= 0 ? '+' : '') + c.offsets[g].toFixed(2) + ' (n=' + c.group_n[g] + ', sd ' + (c.group_sd[g] || 0).toFixed(2) + ')';
     }).join('; ');
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( comps(TVL, group) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x age(t) x reach )'
+        'implied = round( comps(TVL, group, chains, age) x (1 + clamp(change_7d, -' + m.growth_mult_cap + ', ' + m.growth_mult_cap + ') / 100 x ' + m.growth_weight + ') x age(t) x reach )'
       ),
-      el('p', { class: 'sub', text: 'The comps curve is log market cap on log TVL, fitted by least squares on ' + c.live_n + ' live-token protocols (exchanges excluded), with one offset per comps group: ' + offsets + '. Its slope is ' + c.slope.toFixed(3) + ' and its R-squared is ' + c.r_squared.toFixed(2) + '. Validated out of sample in ' + c.cv_folds + ' folds by slug hash, its median held-out error is ' + c.cv_median_log_error.toFixed(2) + ' log points, against 1.56 for a flat market-cap-to-TVL multiple — so the curve is used, and its error is stated, not hidden. Age rises from 0.6 to 1.0 over the first ' + m.maturity_days + ' days, then decays to 0.85: a protocol that has run for years with no token has shown it can run without one. Reach adds ' + (m.reach_step * 100) + '% per extra chain, up to ' + m.reach_max_steps + '.' }),
+      el('p', { class: 'sub', text: 'The comps curve is log market cap on log TVL, fitted by least squares on ' + c.live_n + ' live-token protocols (exchanges excluded), with one offset per comps group, plus log chain count (' + c.chains_coef.toFixed(2) + ') and log age (' + c.age_coef.toFixed(2) + '): both terms earned their place in five-fold validation, while finer groups, per-group slopes and a quadratic TVL term all tested worse and were left out. Offsets: ' + offsets + '. Its slope is ' + c.slope.toFixed(3) + ' and its R-squared is ' + c.r_squared.toFixed(2) + '. Validated out of sample in ' + c.cv_folds + ' folds by slug hash, its median held-out error is ' + c.cv_median_log_error.toFixed(2) + ' log points, against 1.57 for a flat market-cap-to-TVL multiple — so the curve is used, and its error is stated, not hidden. Each row\'s band is one residual spread of its own comps group either way, because the groups are not equally noisy. Age has three phases: seasoning under ' + m.seasoning_days + ' days (' + m.seasoning_floor + ' rising to ' + m.launch_floor + '), the launch window to ' + m.maturity_days + ' days (' + m.launch_floor + ' rising to 1.0), then decay to 0.85: a protocol that has run for years with no token has shown it can run without one. Growth stops paying past ' + m.growth_mult_cap + '% either way: a 7-day spike of thousands of percent is a new pool, not a proportionally better protocol. Reach adds ' + (m.reach_step * 100) + '% per extra chain, up to ' + m.reach_max_steps + '.' }),
       el('h2', { text: 'How a farm is netted' }),
-      el('p', { class: 'sub', text: 'The airdrop pool is assumed to be ' + Math.round(m.airdrop_share * 100) + '% of the implied value, shared among one farmer per $' + m.farmers_per_tvl.toLocaleString('en-US') + ' of TVL and never fewer than 100 farmers. The farm costs the gas for its transactions on its first chain, a $3 bridge fee off Ethereum, and the time value of the capital at ' + Math.round(m.opportunity_apr * 100) + '% a year over the hold. Net is expected value minus cost: FARM when it is at least $' + m.farm_threshold + ', THIN when it is at least $0, SKIP below $0. Signal strength, 0-100, is how much of the record exists: growth reported, listing date known, more than one chain, TVL over $100M, category known. It never moves a rank. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' })
+      el('p', { class: 'sub', text: 'The airdrop pool is assumed to be ' + Math.round(m.airdrop_share * 100) + '% of the implied value, shared among one farmer per $' + m.farmers_per_tvl.toLocaleString('en-US') + ' of TVL and never fewer than 100 farmers. The farm costs the gas for its transactions on its first chain, a $3 bridge fee off Ethereum, and the time value of the capital at ' + Math.round(m.opportunity_apr * 100) + '% a year over the hold. Net is expected value minus cost: FARM when it is at least $' + m.farm_threshold + ', THIN when it is at least $0, SKIP below $0. Every plan also names the record\'s two biggest risks and how to unwind the position. Signal strength, 0-100, is how much of the record exists: growth reported, listing date known, more than one chain, TVL over $100M, category known, and age inside the launch window. It never moves a rank. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' })
     );
   }
 
@@ -453,6 +463,77 @@
     );
   }
 
+  // The comps chart: every live-token protocol the curve is fitted on, log TVL
+  // against log market cap, coloured by comps group, with the fitted line for this
+  // protocol's group (at its chain count and age) and this protocol's predicted
+  // point and band. It is the curve itself, drawn, so a reader can see what the
+  // model claims instead of taking the number on trust.
+  var GROUP_COLORS = {
+    'Exchange & Derivatives': '#34d399',
+    'Lending & Credit': '#f5b83d',
+    'Yield & Vaults': '#7dd3fc',
+    'Staking & Restaking': '#c4b5fd',
+    'Bridges': '#f87171',
+    'Other': '#93a3bd'
+  };
+  function compsChart(row) {
+    var all = DATA.live_all || [];
+    if (!all.length) return null;
+    var c = DATA.comps;
+    var W = 640, H = 340, PL = 56, PR = 16, PT = 14, PB = 34;
+    var xs = all.map(function (p) { return Math.log10(p.tvl_usd); });
+    var ys = all.map(function (p) { return Math.log10(p.mcap_usd); });
+    var x0 = Math.floor(Math.min.apply(null, xs.concat([Math.log10(row.tvl_usd)])));
+    var x1 = Math.ceil(Math.max.apply(null, xs.concat([Math.log10(row.tvl_usd)])));
+    var y0 = Math.floor(Math.min.apply(null, ys.concat([Math.log10(row.comps_low_usd)])));
+    var y1 = Math.ceil(Math.max.apply(null, ys.concat([Math.log10(row.comps_high_usd)])));
+    function X(v) { return PL + ((v - x0) / (x1 - x0)) * (W - PL - PR); }
+    function Y(v) { return PT + (1 - (v - y0) / (y1 - y0)) * (H - PT - PB); }
+    function tickLabel(p) {
+      if (p >= 9) return '$' + Math.round(Math.pow(10, p - 9)) + 'B';
+      if (p >= 6) return '$' + Math.round(Math.pow(10, p - 6)) + 'M';
+      return '$' + Math.round(Math.pow(10, p - 3)) + 'K';
+    }
+    var s = '';
+    s += '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Comps curve: live-token market caps against TVL, with this protocol\'s predicted value">';
+    for (var gx = x0; gx <= x1; gx++) {
+      s += '<line x1="' + X(gx).toFixed(1) + '" y1="' + PT + '" x2="' + X(gx).toFixed(1) + '" y2="' + (H - PB) + '" class="grid"/>';
+      var anchor = gx === x1 ? ' text-anchor="end"' : gx === x0 ? ' text-anchor="start"' : '';
+      s += '<text x="' + X(gx).toFixed(1) + '" y="' + (H - 12) + '" class="axis"' + anchor + '>' + tickLabel(gx) + '</text>';
+    }
+    for (var gy = y0; gy <= y1; gy++) {
+      s += '<line x1="' + PL + '" y1="' + Y(gy).toFixed(1) + '" x2="' + (W - PR) + '" y2="' + Y(gy).toFixed(1) + '" class="grid"/>';
+      s += '<text x="' + (PL - 8) + '" y="' + (Y(gy) + 4).toFixed(1) + '" class="axis" text-anchor="end">' + tickLabel(gy) + '</text>';
+    }
+    // Fitted line for this protocol's group, at its chain count and age.
+    var off = c.offsets[row.comps_group] || 0;
+    var chains = Math.max(1, (row.chains || []).length);
+    var age = row.age_days === null || row.age_days === undefined ? 365 : row.age_days;
+    var line = '';
+    for (var lx = x0; lx <= x1; lx += 0.25) {
+      var tvl = Math.pow(10, lx);
+      var ly = (c.intercept + c.slope * Math.log(tvl) + c.chains_coef * Math.log(chains) + c.age_coef * Math.log(1 + age) + off) / Math.LN10;
+      line += (line ? ' L' : 'M') + X(lx).toFixed(1) + ' ' + Y(ly).toFixed(1);
+    }
+    s += '<path d="' + line + '" class="fit-line"/>';
+    all.forEach(function (p) {
+      var col = GROUP_COLORS[p.comps_group] || '#93a3bd';
+      s += '<circle cx="' + X(Math.log10(p.tvl_usd)).toFixed(1) + '" cy="' + Y(Math.log10(p.mcap_usd)).toFixed(1) + '" r="3.5" fill="' + col + '" fill-opacity="0.75"><title>' + p.name + ': TVL ' + fmtUsd(p.tvl_usd) + ', market cap ' + fmtUsd(p.mcap_usd) + '</title></circle>';
+    });
+    var px = X(Math.log10(row.tvl_usd));
+    s += '<line x1="' + px.toFixed(1) + '" y1="' + Y(Math.log10(row.comps_high_usd)).toFixed(1) + '" x2="' + px.toFixed(1) + '" y2="' + Y(Math.log10(row.comps_low_usd)).toFixed(1) + '" class="band"/>';
+    s += '<circle cx="' + px.toFixed(1) + '" cy="' + Y(Math.log10(row.comps_base_usd)).toFixed(1) + '" r="6" class="pred"><title>' + row.name + ' predicted at ' + fmtUsd(row.comps_base_usd) + '</title></circle>';
+    s += '</svg>';
+    var legend = Object.keys(GROUP_COLORS).map(function (g) {
+      return '<span class="legend-item"><i style="background:' + GROUP_COLORS[g] + '"></i>' + g + '</span>';
+    }).join('');
+    return el('div', { class: 'chart' },
+      el('div', { html: s }),
+      el('div', { class: 'legend', html: legend + '<span class="legend-item"><i class="pred-dot"></i>' + row.name + ' predicted</span>' }),
+      el('p', { class: 'sub', text: 'Each dot is one of the ' + all.length + ' live-token protocols the curve is fitted on. The line is the fitted curve for a ' + row.comps_group + ' protocol at this chain count and age; the gold marker is this protocol\'s predicted market cap, with its band one group residual spread either way.' })
+    );
+  }
+
   function openDetail(slug) {
     var found = rankedRows().filter(function (x) { return x.row.slug === slug; })[0];
     if (!found) return;
@@ -483,7 +564,7 @@
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(found.implied) }))
       ),
       factorRow('Comps base', fmtUsd(f.base), 100),
-      factorRow('Comps band (one residual sd)', fmtUsd(row.comps_low_usd) + ' - ' + fmtUsd(row.comps_high_usd), 60),
+      factorRow('Comps band (one group sd)', fmtUsd(row.comps_low_usd) + ' - ' + fmtUsd(row.comps_high_usd), 60),
       factorRow('Growth x ' + f.growthMult.toFixed(2), fmtPct(f.growth), 50 + Math.max(-50, Math.min(50, f.growth))),
       factorRow('Age x ' + f.maturity.toFixed(2), fmtAge(row.age_days), f.maturity * 100),
       factorRow('Reach x ' + f.reach.toFixed(2), (row.chains || []).length + ' chain' + ((row.chains || []).length === 1 ? '' : 's'), ((f.reach - 1) / 0.16) * 100),
@@ -491,6 +572,13 @@
         ? 'Sandbox ranking: this row is recomputed with your constants. Reset the sandbox to see the submitted board again. This is an estimate, not a price.'
         : 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model, state.sb).implied) + (impliedOf(row, DATA.model, state.sb).implied === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    var chart = compsChart(row);
+    if (chart) {
+      dialog.appendChild(el('section', { class: 'detail-section' },
+        el('h3', { text: 'The comps curve, drawn' }),
+        chart
+      ));
+    }
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Netted verdict' }),
       el('div', { class: 'equation' },
@@ -499,7 +587,11 @@
         el('div', null, el('span', { text: 'Net per farmer' }), el('b', { class: 'num', text: fmtSigned(net.net) })),
         el('div', null, el('span', { text: 'Verdict' }), el('b', { class: 'num', text: net.verdict.toUpperCase() }))
       ),
-      el('p', { class: 'sub', text: 'Expected from a ' + Math.round(state.sb.share * 100) + '% airdrop pool shared among about ' + net.farmers.toLocaleString('en-US') + ' farmers, minus gas, bridge and time value. FARM at $' + DATA.model.farm_threshold + ' or more, THIN at $0 or more, SKIP below $0.' })
+      el('div', { class: 'netbar', 'aria-hidden': 'true' },
+        el('i', { class: 'net-expected', style: 'width:' + Math.round((net.expected / Math.max(1, net.expected, net.cost)) * 100) + '%' }),
+        el('i', { class: 'net-cost', style: 'width:' + Math.round((net.cost / Math.max(1, net.expected, net.cost)) * 100) + '%' })
+      ),
+      el('p', { class: 'sub', text: 'Expected per farmer (green) against the farm\'s cost (red). Expected from a ' + Math.round(state.sb.share * 100) + '% airdrop pool shared among about ' + net.farmers.toLocaleString('en-US') + ' farmers, minus gas, bridge and time value. FARM at $' + DATA.model.farm_threshold + ' or more, THIN at $0 or more, SKIP below $0.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Why it ranks here' }),
