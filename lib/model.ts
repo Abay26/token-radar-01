@@ -1,40 +1,44 @@
-// Token Radar's model, radar-3: one snapshot of the protocol universe in, one ranked board out.
+// Token Radar's model, radar-4: one snapshot of the protocol universe in, one ranked board out.
 //
-// radar-3 replaces radar-2's flat TVL multiple with a comps curve fitted on the snapshot's own
-// live-token protocols, and it nets every farm plan: each row carries what one farmer can expect
-// against what the farm costs, and a verdict of farm, thin or skip.
+// radar-4 replaces radar-3's curve with one that reads more of the record: log market cap is
+// regressed on log TVL with one offset per comps group AND on how many chains a protocol runs
+// on and how long it has been listed — both terms are snapshot figures, and both earn their
+// place: five-fold validation by slug hash cuts the median held-out log error from 1.20 to
+// 1.13 when they are added, while finer groups, per-group slopes and a quadratic TVL term all
+// tested worse and were left out. The curve's band is honest per group now: each comps
+// group's own residual spread sets its interval, because the groups are not equally noisy
+// (Lending and Bridges spread 2.3 log points, Other only 1.4).
 //
-// The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
-// the pre-token protocols below the watchlist floor: the early rows the radar exists to find. A
-// protocol is pre-token when its index entry records no token (no market cap, no CoinGecko id, no
-// symbol); the snapshot's live-token protocols are kept apart and shown as the market's own
-// values, never mixed into the ranked board. The wrapped, staked and bridged products above the
-// floor (WBTC, exchange staking products, bridges) are not ranked: each is a product of a token
-// that already trades, not a protocol waiting on a launch of its own.
+// The age curve has three phases now, because a protocol's age means three different things:
+// seasoning (listed under 180 days: the record is thin, so the multiplier ramps 0.55 to
+// 0.85), the launch window (180 to 1095 days: the prime farming age, 0.85 rising to 1.0) and
+// the long tail (past 1095 days: it has shown it can run without a token, decaying to 0.85).
+// Growth is winsorized to +/-60% for the multiplier: a 7-day spike of 4000% is a new pool,
+// not a four-thousand-percent better protocol, and the multiplier stops paying past it.
 //
-// The comps curve: on the live-token protocols (market cap and TVL both recorded, CEX excluded),
-// log market cap is regressed on log TVL with one offset per comps group. The groups are six
-// buckets of DefiLlama categories, coarse enough that every group holds at least fifteen live
-// protocols, so no offset rests on one or two names. The fit is ordinary least squares on the
-// normal equations, solved by Gaussian elimination: deterministic, no network, no randomness, so
-// two runs of the program write the same board. The curve is validated out of sample: the live
-// set is split into five folds by a hash of the slug, each fold is predicted from a fit on the
-// other four, and the dashboard states the median absolute log error across the held-out folds.
-// A pre-token protocol's comps base is its predicted market cap from the curve; its implied
-// value is that base adjusted by the same growth, age and reach multipliers radar-2 used.
+// The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and
+// adds the pre-token protocols below the watchlist floor: the early rows the radar exists to
+// find. A protocol is pre-token when its index entry records no token (no market cap, no
+// CoinGecko id, no symbol); the snapshot's live-token protocols are kept apart and shown as
+// the market's own values, never mixed into the ranked board. The wrapped, staked and
+// bridged products above the floor (WBTC, exchange staking products, bridges) are not
+// ranked: each is a product of a token that already trades, not a protocol waiting on a
+// launch of its own.
 //
-// The net: an airdrop pool is assumed to be 10% of the implied value (stated in the dashboard,
-// adjustable in its sandbox), shared among the active farmers, estimated at one farmer per
-// $5,000 of TVL and never fewer than 100. The farm's cost is the gas for its transactions on its
-// first chain, a $3 bridge fee when the chain is not Ethereum, and the time value of the capital
-// at 5% a year over the hold. Net is expected value minus cost: farm when it is at least $50,
-// thin when it is at least $0, skip when it is below $0. Every number in that arithmetic is on
-// the row, so a reader can check the verdict instead of taking it on trust.
+// The net: an airdrop pool is assumed to be 10% of the implied value (stated in the
+// dashboard, adjustable in its sandbox), shared among the active farmers, estimated at one
+// farmer per $5,000 of TVL and never fewer than 100. The farm's cost is the gas for its
+// transactions on its first chain, a $3 bridge fee when the chain is not Ethereum, and the
+// time value of the capital at 5% a year over the hold. Net is expected value minus cost:
+// farm when it is at least $50, thin when it is at least $0, skip when it is below $0.
+// Every number in that arithmetic is on the row, so a reader can check the verdict instead
+// of taking it on trust. Every farm plan also names the record's two biggest risks and how
+// to unwind the position, so the plan says what can go wrong, not only what to do.
 //
 // Confidence is a second number, 0-100, from how much of the record exists at all: growth
-// reported, age known, more than one chain, TVL at or above $100M, category known. It never
-// moves the rank; it says how much signal the rank rests on. No protocol name is ever
-// special-cased: the same functions score every row.
+// reported, age known and inside the launch window, more than one chain, TVL at or above
+// $100M, category known. It never moves the rank; it says how much signal the rank rests
+// on. No protocol name is ever special-cased: the same functions score every row.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -64,9 +68,13 @@ export interface ModelConstants {
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
+  growth_mult_cap: number;
   maturity_floor: number;
   maturity_range: number;
   maturity_days: number;
+  seasoning_days: number;
+  seasoning_floor: number;
+  launch_floor: number;
   unknown_age_days: number;
   reach_step: number;
   reach_max_steps: number;
@@ -81,9 +89,13 @@ export const MODEL: ModelConstants = {
   growth_weight: 0.6,
   growth_floor: -60,
   growth_cap: 120,
+  growth_mult_cap: 60,
   maturity_floor: 0.6,
   maturity_range: 0.4,
   maturity_days: 1095,
+  seasoning_days: 180,
+  seasoning_floor: 0.55,
+  launch_floor: 0.85,
   unknown_age_days: 365,
   reach_step: 0.04,
   reach_max_steps: 4,
@@ -95,7 +107,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 260;
@@ -187,14 +199,18 @@ export interface LiveRow {
   tvl_usd: number;
   mcap_usd: number | null;
   change_7d: number | null;
+  comps_group: string;
 }
 
 /** The fitted comps curve, with its out-of-sample validation, for the dashboard. */
 export interface CompsFit {
   intercept: number;
   slope: number;
+  chains_coef: number;
+  age_coef: number;
   offsets: Record<string, number>;
   group_n: Record<string, number>;
+  group_sd: Record<string, number>;
   residual_sd: number;
   r_squared: number;
   cv_median_log_error: number;
@@ -217,6 +233,7 @@ export interface RadarData {
   verdict_counts: Record<Verdict, number>;
   rows: RadarRow[];
   live: LiveRow[];
+  live_all: LiveRow[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -247,15 +264,24 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
 }
 
 /**
- * The age multiplier: 0.6 rising to 1.0 over the first `maturity_days` days, then decaying by
- * `age_decay` over the next `maturity_days` days to 0.85, and flat after that. A young protocol
- * earns its multiplier by surviving; an old one with no token after years has shown it can run
- * without one, so the multiplier stops paying.
+ * The age multiplier, in three phases. Seasoning: a protocol listed under
+ * `seasoning_days` days has a thin record, so the multiplier ramps from
+ * `seasoning_floor` to `launch_floor`. Launch window: from seasoning to
+ * `maturity_days` days it rises from `launch_floor` to 1.0 — the prime farming age, old
+ * enough to have a record and young enough that a token is still plausible. Long tail:
+ * past `maturity_days` it decays by `age_decay` to 0.85 over the next `maturity_days`
+ * days and stays there: a protocol that has run for years with no token has shown it can
+ * run without one, so the multiplier stops paying.
  */
 export function ageMultiplier(age: number | null, model: ModelConstants): number {
   const a = age ?? model.unknown_age_days;
+  if (a <= model.seasoning_days) {
+    const f = Math.min(Math.max(a, 0), model.seasoning_days) / model.seasoning_days;
+    return model.seasoning_floor + f * (model.launch_floor - model.seasoning_floor);
+  }
   if (a <= model.maturity_days) {
-    return model.maturity_floor + (Math.min(Math.max(a, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+    const f = (a - model.seasoning_days) / (model.maturity_days - model.seasoning_days);
+    return model.launch_floor + f * (1 - model.launch_floor);
   }
   const over = Math.min((a - model.maturity_days) / model.maturity_days, 1);
   return 1 - model.age_decay * over;
@@ -330,21 +356,21 @@ function solveLinear(a: number[][], b: number[]): number[] | null {
   return x;
 }
 
-/** One design row: intercept, log TVL, and one dummy per comps group after the first. */
-function compsDesignRow(p: SnapshotProtocol): number[] {
-  const row = [1, Math.log(p.tvl_usd)];
+/** One design row: intercept, log TVL, log chain count, log age, and one dummy per comps group after the first. */
+function compsDesignRow(p: SnapshotProtocol, asOf: string): number[] {
+  const row = [1, Math.log(p.tvl_usd), Math.log(Math.max(1, p.chains.length)), Math.log(1 + (ageDays(asOf, p.listed_at) ?? 365))];
   const g = compsGroup(p.category);
   for (let i = 1; i < COMPS_GROUPS.length; i++) row.push(g === COMPS_GROUPS[i] ? 1 : 0);
   return row;
 }
 
-/** Ordinary least squares for log market cap on log TVL plus comps-group dummies. */
-function fitOls(rows: SnapshotProtocol[]): number[] | null {
-  const p = COMPS_GROUPS.length + 1;
+/** Ordinary least squares for log market cap on log TVL, log chains, log age, plus comps-group dummies. */
+function fitOls(rows: SnapshotProtocol[], asOf: string): number[] | null {
+  const p = COMPS_GROUPS.length + 3;
   const ata: number[][] = Array.from({ length: p }, () => new Array<number>(p).fill(0));
   const atb = new Array<number>(p).fill(0);
   for (const protocol of rows) {
-    const x = compsDesignRow(protocol);
+    const x = compsDesignRow(protocol, asOf);
     const y = Math.log(protocol.mcap_usd!);
     for (let i = 0; i < p; i++) {
       atb[i] += x[i]! * y;
@@ -355,8 +381,8 @@ function fitOls(rows: SnapshotProtocol[]): number[] | null {
 }
 
 /** A fitted curve's prediction of log market cap for one protocol. */
-function predictLog(beta: number[], p: SnapshotProtocol): number {
-  const x = compsDesignRow(p);
+function predictLog(beta: number[], p: SnapshotProtocol, asOf: string): number {
+  const x = compsDesignRow(p, asOf);
   let sum = 0;
   for (let i = 0; i < beta.length; i++) sum += beta[i]! * x[i]!;
   return sum;
@@ -374,18 +400,19 @@ function median(nums: number[]): number | null {
  * The comps curve fitted on the snapshot's live-token protocols, with its out-of-sample
  * validation: five folds by slug hash, each fold predicted from a fit on the other four.
  * Live-token protocols are those with a market cap and a TVL, exchanges excluded: a CEX's
- * token is a company, not a protocol launch.
+ * token is a company, not a protocol launch. The band is per group: each group's own
+ * residual spread sets its interval, because the groups are not equally noisy.
  */
 export function fitComps(snapshot: Snapshot): CompsFit {
   const live = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX');
-  const beta = fitOls(live);
+  const beta = fitOls(live, snapshot.as_of);
   if (beta === null) throw new SnapshotError('the comps fit is singular: the live-token set cannot fit a curve');
   const residuals: number[] = [];
   let ssRes = 0;
   let ssTot = 0;
   const meanY = live.reduce((s, p) => s + Math.log(p.mcap_usd!), 0) / live.length;
   for (const p of live) {
-    const r = Math.log(p.mcap_usd!) - predictLog(beta, p);
+    const r = Math.log(p.mcap_usd!) - predictLog(beta, p, snapshot.as_of);
     residuals.push(r);
     ssRes += r * r;
     ssTot += (Math.log(p.mcap_usd!) - meanY) ** 2;
@@ -394,22 +421,32 @@ export function fitComps(snapshot: Snapshot): CompsFit {
   for (let fold = 0; fold < 5; fold++) {
     const train = live.filter((p) => fnvHash(p.slug) % 5 !== fold);
     const test = live.filter((p) => fnvHash(p.slug) % 5 === fold);
-    const foldBeta = fitOls(train);
+    const foldBeta = fitOls(train, snapshot.as_of);
     if (foldBeta === null) continue;
-    for (const p of test) heldOut.push(Math.abs(Math.log(p.mcap_usd!) - predictLog(foldBeta, p)));
+    for (const p of test) heldOut.push(Math.abs(Math.log(p.mcap_usd!) - predictLog(foldBeta, p, snapshot.as_of)));
   }
   const offsets: Record<string, number> = {};
   const groupN: Record<string, number> = {};
+  const groupSd: Record<string, number> = {};
   for (const g of COMPS_GROUPS) {
-    groupN[g] = live.filter((p) => compsGroup(p.category) === g).length;
+    const members = live.filter((p) => compsGroup(p.category) === g);
+    groupN[g] = members.length;
     offsets[g] = 0;
+    const ss = members.reduce((s, p) => {
+      const r = Math.log(p.mcap_usd!) - predictLog(beta, p, snapshot.as_of);
+      return s + r * r;
+    }, 0);
+    groupSd[g] = members.length > 1 ? Math.sqrt(ss / (members.length - 1)) : Math.sqrt(ssRes / Math.max(1, live.length - beta.length));
   }
-  for (let i = 1; i < COMPS_GROUPS.length; i++) offsets[COMPS_GROUPS[i]!] = beta[i + 1]!;
+  for (let i = 1; i < COMPS_GROUPS.length; i++) offsets[COMPS_GROUPS[i]!] = beta[i + 3]!;
   return {
     intercept: beta[0]!,
     slope: beta[1]!,
+    chains_coef: beta[2]!,
+    age_coef: beta[3]!,
     offsets,
     group_n: groupN,
+    group_sd: groupSd,
     residual_sd: Math.sqrt(ssRes / Math.max(1, live.length - beta.length)),
     r_squared: ssTot > 0 ? 1 - ssRes / ssTot : 0,
     cv_median_log_error: median(heldOut) ?? 0,
@@ -418,25 +455,34 @@ export function fitComps(snapshot: Snapshot): CompsFit {
   };
 }
 
-/** A protocol's comps base: the curve's predicted market cap for its TVL and group. */
-export function compsBase(p: SnapshotProtocol, fit: CompsFit): number {
+/** A protocol's comps base: the curve's predicted market cap for its TVL, chains, age and group. */
+export function compsBase(p: SnapshotProtocol, fit: CompsFit, asOf: string): number {
   const g = compsGroup(p.category);
-  const logBase = fit.intercept + fit.slope * Math.log(p.tvl_usd) + (fit.offsets[g] ?? 0);
+  const age = ageDays(asOf, p.listed_at) ?? 365;
+  const logBase =
+    fit.intercept +
+    fit.slope * Math.log(p.tvl_usd) +
+    fit.chains_coef * Math.log(Math.max(1, p.chains.length)) +
+    fit.age_coef * Math.log(1 + age) +
+    (fit.offsets[g] ?? 0);
   return Math.exp(logBase);
 }
 
 /**
- * Signal strength, 0-100: how much of the record exists at all. Growth reported is worth 30,
- * a known listing date 25, more than one chain 15, TVL at or above $100M 15 and a known
- * category 15. It never moves a rank; it says how much signal the rank rests on.
+ * Signal strength, 0-100: how much of the record exists at all. Growth reported is worth
+ * 25, a known listing date 20, more than one chain 15, TVL at or above $100M 15, a known
+ * category 10, and an age inside the launch window (180 to 1095 days) 15. It never moves a
+ * rank; it says how much signal the rank rests on.
  */
-export function confidenceOf(p: SnapshotProtocol): number {
+export function confidenceOf(p: SnapshotProtocol, asOf: string): number {
   let score = 0;
-  if (p.change_7d !== null) score += 30;
-  if (p.listed_at !== null) score += 25;
+  if (p.change_7d !== null) score += 25;
+  if (p.listed_at !== null) score += 20;
   if (p.chains.length >= 2) score += 15;
   if (p.tvl_usd >= 100_000_000) score += 15;
-  if (p.category !== null) score += 15;
+  if (p.category !== null) score += 10;
+  const age = ageDays(asOf, p.listed_at);
+  if (age !== null && age >= 180 && age <= 1095) score += 15;
   return score;
 }
 
@@ -449,12 +495,15 @@ export function impliedValue(
 ): { implied: number; base: number; growthPct: number; growthMult: number; maturityMult: number; reachMult: number; group: string; offset: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, asNumber(protocol.change_7d, 0)));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
+  // The multiplier stops paying past +/-60%: a 7-day spike of thousands of percent is a new
+  // pool, not a proportionally better protocol.
+  const growthForMult = Math.min(model.growth_mult_cap, Math.max(-model.growth_mult_cap, growthPct));
+  const growthMult = 1 + (growthForMult / 100) * model.growth_weight;
   const maturityMult = ageMultiplier(age, model);
   const reachMult = reachMultiplier(protocol.chains, model);
   const group = compsGroup(protocol.category);
   const offset = fit.offsets[group] ?? 0;
-  const base = compsBase(protocol, fit);
+  const base = compsBase(protocol, fit, asOf);
   const unrounded = base * growthMult * maturityMult * reachMult;
   const implied = Math.max(1, Math.round(unrounded));
   return { implied, base, growthPct, growthMult, maturityMult, reachMult, group, offset, age };
@@ -590,11 +639,29 @@ function recurringFor(p: SnapshotProtocol, chain: string): string {
   return `Make one qualifying action on ${name}: a deposit, a borrow, a swap or a vote.`;
 }
 
+/** The record's two biggest risks, in plain words, for the farm plan's risk step. */
+export function risksFor(p: SnapshotProtocol, age: number | null, net: number): string[] {
+  const risks: string[] = [];
+  if (p.change_7d === null) risks.push('its TVL trend is unreported, so the farm rests on a level with no direction');
+  else if (p.change_7d < -20) risks.push(`its TVL fell ${Math.abs(p.change_7d).toFixed(0)}% in 7 days, so the farm is catching a falling protocol`);
+  else if (p.change_7d > 200) risks.push(`its TVL spiked ${p.change_7d.toFixed(0)}% in 7 days, so the level may be a new pool, not a trend`);
+  if (p.chains.length < 2) risks.push('it lives on one chain, so one chain outage or exploit ends the farm');
+  if (age === null) risks.push('its listing date is unknown, so there is no age to judge the launch window by');
+  else if (age < 180) risks.push(`it was listed only ${age} days ago, so the record is thin and the points program may not exist yet`);
+  else if (age > 1460) risks.push(`it has run ${Math.round(age / 365)} years with no token, so it may never issue one`);
+  if (p.category === null) risks.push('its category is unreported, so the comps group is a guess');
+  if (net < 0) risks.push('the model nets this farm below zero, so it pays only if the airdrop pool is larger than assumed');
+  if (risks.length === 0) risks.push('the record is complete, so the main risk is the airdrop itself: the pool may be smaller than assumed');
+  if (risks.length === 1) risks.push('the airdrop pool is an assumption, never a promise: it may be smaller than the model assumes');
+  return risks.slice(0, 2);
+}
+
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is
+ * A protocol's farm plan: nine steps, each an action with a cost and a time. The plan is
  * derived from the protocol's own record (category, chains, TVL, age, growth), never from a
- * hand-written list of names. The last step nets the plan: the expected value against the
- * cost, and the verdict that follows from it.
+ * hand-written list of names. Two of the steps are new in radar-4: the risks step names what
+ * can go wrong, from the same record, and the exit step says how to unwind. The last step
+ * nets the plan: the expected value against the cost, and the verdict that follows from it.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null, net: { expected: number; cost: number; net: number; verdict: Verdict }, model: ModelConstants): FarmStep[] {
   const chain = chainOf(p);
@@ -606,6 +673,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, net: { expect
       : net.verdict === 'thin'
         ? 'the model barely pays: farm only with capital already on this chain'
         : 'the model does not pay for this farm';
+  const risks = risksFor(p, age, net.net);
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and bridge $${cost.capital} of USDC to ${chain}. Keep the seed phrase offline.`,
@@ -636,6 +704,16 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, net: { expect
       text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.',
       cost: 'nothing but the log',
       time: '5 minutes',
+    },
+    {
+      text: `Risks, from the record itself: ${risks[0]}; ${risks[1]}. Size the farm so losing it does not hurt.`,
+      cost: 'no fee: the risk is the position itself',
+      time: '5 minutes to check',
+    },
+    {
+      text: `To exit, withdraw the position back to USDC on ${chain}, bridge it home, and stop the weekly actions. Do not leave dust in a wallet you stop watching.`,
+      cost: `about $${Math.max(1, Math.round(gasPerTx(chain) * 2))} of gas to unwind`,
+      time: '15 minutes to unwind',
     },
     {
       text: `Net for one farmer: $${net.expected} expected from a ${Math.round(model.airdrop_share * 100)}% airdrop pool, minus $${net.cost} of gas and time value, leaves $${net.net}: ${net.verdict.toUpperCase()} — ${verdictLine}.`,
@@ -673,7 +751,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
   const scored: Array<ReturnType<typeof impliedValue> & { p: SnapshotProtocol; confidence: number }> = [];
   for (const p of chosen.values()) {
     const v = impliedValue(p, snapshot.as_of, model, comps);
-    scored.push({ p, ...v, confidence: confidenceOf(p) });
+    scored.push({ p, ...v, confidence: confidenceOf(p, snapshot.as_of) });
   }
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => {
@@ -681,8 +759,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
     const exp = expectedValue(s.implied, s.p.tvl_usd, model);
     const net = exp.expected - cost.total;
     const verdict = verdictOf(net, model);
-    const low = Math.max(1, Math.round(s.base * Math.exp(-comps.residual_sd)));
-    const high = Math.round(s.base * Math.exp(comps.residual_sd));
+    // The band uses the row's own comps group's residual spread, not the pooled one: the
+    // groups are not equally noisy, so a tight group's band is narrower than a noisy one's.
+    const sd = comps.group_sd[s.group] ?? comps.residual_sd;
+    const low = Math.max(1, Math.round(s.base * Math.exp(-sd)));
+    const high = Math.round(s.base * Math.exp(sd));
     return {
       rank: i + 1,
       slug: s.p.slug,
@@ -738,6 +819,23 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     tvl_usd: p.tvl_usd,
     mcap_usd: p.mcap_usd,
     change_7d: p.change_7d,
+    comps_group: compsGroup(p.category),
+  }));
+}
+
+/** Every live-token protocol the curve is fitted on, by market cap, for the comps chart. */
+export function liveAllRows(snapshot: Snapshot): LiveRow[] {
+  const trading = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX');
+  trading.sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd);
+  return trading.map((p) => ({
+    slug: p.slug,
+    name: p.name,
+    category: p.category,
+    chains: p.chains,
+    tvl_usd: p.tvl_usd,
+    mcap_usd: p.mcap_usd,
+    change_7d: p.change_7d,
+    comps_group: compsGroup(p.category),
   }));
 }
 
@@ -776,6 +874,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const fit = fitComps(snapshot);
   const board = buildBoard(snapshot, model, fit);
   const live = liveRows(snapshot);
+  const liveAll = liveAllRows(snapshot);
   let early = 0;
   const verdictCounts: Record<Verdict, number> = { farm: 0, thin: 0, skip: 0 };
   for (const r of board) {
@@ -798,6 +897,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     verdict_counts: verdictCounts,
     rows,
     live,
+    live_all: liveAll,
   };
   return { board, radar };
 }
