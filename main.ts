@@ -1,15 +1,18 @@
 // Token Radar's entrypoint (Node 22, standard library only).
 //
-// It loads the sealed DefiLlama snapshot, scores every pre-token protocol with the radar-2
-// model in lib/model.ts, and writes the results into the output directory: the ranked board as
-// board.json, the dashboard's dataset as data.js, the dashboard/ page, the screenshots/ of it,
-// and dossier.json, the summary the judge reads, built with the vendored make.fun library.
+// It loads the sealed DefiLlama snapshot, scores every pre-token protocol with the radar-3
+// model in lib/model.ts — a comps curve fitted on the snapshot's live-token protocols, validated
+// out of sample, with every farm plan netted to a farm, thin or skip verdict — and writes the
+// results into the output directory: the ranked board as board.json, the dashboard's dataset as
+// data.js, the dashboard/ page, the screenshots/ of it, and dossier.json, the summary the judge
+// reads, built with the vendored make.fun library.
 //
 // The dashboard is a static page with no framework and no network. Its files live in
 // dashboard/ beside this file; the screenshots live in screenshots/. Both directories are
 // copied into the output as they are, so what the judge sees is the page this repository
 // ships. The page also carries a model sandbox: it re-ranks the board live from the same
-// function that scored it, and it shows a confidence score and a farm plan for every row.
+// function that scored it, and it shows a comps breakdown, a netted farm verdict and a farm
+// plan with costs and times for every row.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json

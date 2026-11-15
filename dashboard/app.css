@@ -105,6 +105,10 @@ tbody tr[data-selected="true"] { background: var(--accent-dim); }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .status.live::before { background: var(--gold); }
 .badge-early { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: var(--accent-dim); color: var(--accent); font-size: 11px; font-family: var(--font-num); }
+.verdict { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; font-family: var(--font-num); letter-spacing: 0.04em; white-space: nowrap; }
+.verdict-farm { background: var(--accent); color: #08130d; }
+.verdict-thin { background: #3d3208; color: var(--gold); border: 1px solid #6b5518; }
+.verdict-skip { background: #2a1414; color: var(--negative); border: 1px solid #5b2323; }
 .conf { display: inline-flex; align-items: center; gap: 6px; }
 .conf .bar { width: 48px; }
 .conf b { font-weight: 600; }
