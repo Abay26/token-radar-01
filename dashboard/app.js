@@ -1,8 +1,9 @@
-// Token Radar's dashboard, radar-4. It reads window.RADAR (written beside dashboard/ by main.ts)
+// Token Radar's dashboard, radar-5. It reads window.RADAR (written beside dashboard/ by main.ts)
 // and renders the ranked board, a filterable table, a per-protocol detail drawer with the comps
-// breakdown, the netted farm verdict and the protocol's farm plan, and a model sandbox that
-// re-ranks the board live from the same function that scored it. No network: every byte it
-// shows is in data.js.
+// breakdown, the netted farm verdict and the protocol's farm plan — the plan first, right after
+// the implied value, so a reader sees the concrete steps with their costs and times without
+// scrolling past the chart — and a model sandbox that re-ranks the board live from the same
+// function that scored it. No network: every byte it shows is in data.js.
 //
 // The model in one place: impliedOf below is the same arithmetic as lib/model.ts's impliedValue,
 // so the page recomputes a row from the snapshot figures and checks the number board.json
@@ -409,7 +410,7 @@
       el('div', { class: 'formula' },
         'implied = round( comps(TVL, group, chains, age) x (1 + clamp(change_7d, -' + m.growth_mult_cap + ', ' + m.growth_mult_cap + ') / 100 x ' + m.growth_weight + ') x age(t) x reach )'
       ),
-      el('p', { class: 'sub', text: 'The comps curve is log market cap on log TVL, fitted by least squares on ' + c.live_n + ' live-token protocols (exchanges excluded), with one offset per comps group, plus log chain count (' + c.chains_coef.toFixed(2) + ') and log age (' + c.age_coef.toFixed(2) + '): both terms earned their place in five-fold validation, while finer groups, per-group slopes and a quadratic TVL term all tested worse and were left out. Offsets: ' + offsets + '. Its slope is ' + c.slope.toFixed(3) + ' and its R-squared is ' + c.r_squared.toFixed(2) + '. Validated out of sample in ' + c.cv_folds + ' folds by slug hash, its median held-out error is ' + c.cv_median_log_error.toFixed(2) + ' log points, against 1.57 for a flat market-cap-to-TVL multiple — so the curve is used, and its error is stated, not hidden. Each row\'s band is one residual spread of its own comps group either way, because the groups are not equally noisy. Age has three phases: seasoning under ' + m.seasoning_days + ' days (' + m.seasoning_floor + ' rising to ' + m.launch_floor + '), the launch window to ' + m.maturity_days + ' days (' + m.launch_floor + ' rising to 1.0), then decay to 0.85: a protocol that has run for years with no token has shown it can run without one. Growth stops paying past ' + m.growth_mult_cap + '% either way: a 7-day spike of thousands of percent is a new pool, not a proportionally better protocol. Reach adds ' + (m.reach_step * 100) + '% per extra chain, up to ' + m.reach_max_steps + '.' }),
+      el('p', { class: 'sub', text: 'The comps curve is log market cap on log TVL, fitted by median regression on ' + c.live_n + ' live-token protocols (exchanges excluded), with one offset per comps group, plus log chain count (' + c.chains_coef.toFixed(2) + ') and log age (' + c.age_coef.toFixed(2) + '): both terms earned their place in five-fold validation, while finer groups, per-group slopes, a quadratic TVL term, a growth term, a stablecoin dummy, Huber and a trimmed refit all tested worse and were left out. Median, not least squares: the live set has extreme outliers, and least squares lets one meme token drag the line, so the fit is least absolute deviations by iteratively reweighted least squares, which follows the typical protocol instead. Offsets: ' + offsets + '. Its slope is ' + c.slope.toFixed(3) + '. Validated out of sample in ' + c.cv_folds + ' folds by slug hash, its median held-out error is ' + c.cv_median_log_error.toFixed(2) + ' log points and its mean is ' + c.cv_mean_log_error.toFixed(2) + ', against 1.59 for a flat market-cap-to-TVL multiple — so the curve is used, and its error is stated, not hidden. Each row\'s band is one residual spread of its own comps group either way, because the groups are not equally noisy. Age has three phases: seasoning under ' + m.seasoning_days + ' days (' + m.seasoning_floor + ' rising to ' + m.launch_floor + '), the launch window to ' + m.maturity_days + ' days (' + m.launch_floor + ' rising to 1.0), then decay to 0.85: a protocol that has run for years with no token has shown it can run without one. Growth stops paying past ' + m.growth_mult_cap + '% either way: a 7-day spike of thousands of percent is a new pool, not a proportionally better protocol. Reach adds ' + (m.reach_step * 100) + '% per extra chain, up to ' + m.reach_max_steps + '.' }),
       el('h2', { text: 'How a farm is netted' }),
       el('p', { class: 'sub', text: 'The airdrop pool is assumed to be ' + Math.round(m.airdrop_share * 100) + '% of the implied value, shared among one farmer per $' + m.farmers_per_tvl.toLocaleString('en-US') + ' of TVL and never fewer than 100 farmers. The farm costs the gas for its transactions on its first chain, a $3 bridge fee off Ethereum, and the time value of the capital at ' + Math.round(m.opportunity_apr * 100) + '% a year over the hold. Net is expected value minus cost: FARM when it is at least $' + m.farm_threshold + ', THIN when it is at least $0, SKIP below $0. Every plan also names the record\'s two biggest risks and how to unwind the position. Signal strength, 0-100, is how much of the record exists: growth reported, listing date known, more than one chain, TVL over $100M, category known, and age inside the launch window. It never moves a rank. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' })
     );
@@ -480,7 +481,7 @@
     var all = DATA.live_all || [];
     if (!all.length) return null;
     var c = DATA.comps;
-    var W = 640, H = 340, PL = 56, PR = 16, PT = 14, PB = 34;
+    var W = 640, H = 260, PL = 56, PR = 16, PT = 14, PB = 34;
     var xs = all.map(function (p) { return Math.log10(p.tvl_usd); });
     var ys = all.map(function (p) { return Math.log10(p.mcap_usd); });
     var x0 = Math.floor(Math.min.apply(null, xs.concat([Math.log10(row.tvl_usd)])));
@@ -570,7 +571,19 @@
       factorRow('Reach x ' + f.reach.toFixed(2), (row.chains || []).length + ' chain' + ((row.chains || []).length === 1 ? '' : 's'), ((f.reach - 1) / 0.16) * 100),
       el('p', { class: 'sub', text: sandboxActive()
         ? 'Sandbox ranking: this row is recomputed with your constants. Reset the sandbox to see the submitted board again. This is an estimate, not a price.'
-        : 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model, state.sb).implied) + (impliedOf(row, DATA.model, state.sb).implied === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+        : 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model, state.sb).implied) + (Math.abs(impliedOf(row, DATA.model, state.sb).implied - row.implied_value_usd) <= 2 ? ', the same number board.json carries (whole-dollar rounding aside).' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+    ));
+    // The farm plan comes first, right after the implied value: it is the one part of a
+    // protocol's detail that no other view shows, and a reader should see the concrete
+    // steps with their costs and times without scrolling past the chart.
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Farm plan' }),
+      el('ol', { class: 'steps' }, steps.map(function (s) {
+        var at = s.indexOf(' Cost: ');
+        var action = at >= 0 ? s.slice(0, at) : s;
+        var tail = at >= 0 ? s.slice(at + 1) : '';
+        return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
+      }))
     ));
     var chart = compsChart(row);
     if (chart) {
@@ -596,15 +609,6 @@
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Why it ranks here' }),
       el('p', { class: 'why', text: why })
-    ));
-    dialog.appendChild(el('section', { class: 'detail-section' },
-      el('h3', { text: 'Farm plan' }),
-      el('ol', { class: 'steps' }, steps.map(function (s) {
-        var at = s.indexOf(' Cost: ');
-        var action = at >= 0 ? s.slice(0, at) : s;
-        var tail = at >= 0 ? s.slice(at + 1) : '';
-        return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
-      }))
     ));
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
