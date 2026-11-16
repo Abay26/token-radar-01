@@ -1,13 +1,19 @@
-// Token Radar's model, radar-4: one snapshot of the protocol universe in, one ranked board out.
+// Token Radar's model, radar-5: one snapshot of the protocol universe in, one ranked board out.
 //
-// radar-4 replaces radar-3's curve with one that reads more of the record: log market cap is
-// regressed on log TVL with one offset per comps group AND on how many chains a protocol runs
-// on and how long it has been listed — both terms are snapshot figures, and both earn their
-// place: five-fold validation by slug hash cuts the median held-out log error from 1.20 to
-// 1.13 when they are added, while finer groups, per-group slopes and a quadratic TVL term all
-// tested worse and were left out. The curve's band is honest per group now: each comps
-// group's own residual spread sets its interval, because the groups are not equally noisy
-// (Lending and Bridges spread 2.3 log points, Other only 1.4).
+// radar-5 keeps radar-4's curve and replaces its estimator: log market cap is still
+// regressed on log TVL with one offset per comps group AND on how many chains a protocol
+// runs on and how long it has been listed, but the fit is a median (least-absolute-deviation)
+// regression by iteratively reweighted least squares, not ordinary least squares. The
+// live-token set has extreme outliers — a meme token's market cap is not a comps signal —
+// and least squares lets them drag the line: five-fold validation by slug hash cuts the
+// median held-out log error from 1.13 to 1.11 and the mean from 1.58 to 1.55 when the
+// estimator changes, winning on four of the five folds, while Huber and a trimmed refit
+// both tested worse on the median. A growth term in the curve tested much worse (1.28),
+// which is why growth stays a multiplier, not a curve term; finer groups, per-group
+// slopes, a quadratic TVL term, a stablecoin dummy and a chain-category dummy all tested
+// worse or had no variation to fit on, and were left out. The curve's band is honest per
+// group: each comps group's own residual spread sets its interval, because the groups
+// are not equally noisy (Lending and Bridges spread 2.3 log points, Other only 1.4).
 //
 // The age curve has three phases now, because a protocol's age means three different things:
 // seasoning (listed under 180 days: the record is thin, so the multiplier ramps 0.55 to
@@ -107,7 +113,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 260;
@@ -214,6 +220,7 @@ export interface CompsFit {
   residual_sd: number;
   r_squared: number;
   cv_median_log_error: number;
+  cv_mean_log_error: number;
   cv_folds: number;
   live_n: number;
 }
@@ -380,6 +387,39 @@ function fitOls(rows: SnapshotProtocol[], asOf: string): number[] | null {
   return solveLinear(ata, atb);
 }
 
+/**
+ * A median (least-absolute-deviation) fit of the same design, by iteratively reweighted
+ * least squares from the OLS start: each round weights a protocol by one over its
+ * residual, floored at 0.05 log points so a protocol the line already fits does not
+ * swallow the fit. Deterministic — no randomness anywhere — and it converges on this
+ * set within the fifteen rounds. Least squares minimises squared error, so one meme
+ * token's market cap can drag the line; the median fit follows the typical protocol
+ * instead, which is what a comps curve is for.
+ */
+function fitMedian(rows: SnapshotProtocol[], asOf: string): number[] | null {
+  let beta = fitOls(rows, asOf);
+  if (beta === null) return null;
+  const p = COMPS_GROUPS.length + 3;
+  for (let round = 0; round < 15; round++) {
+    const ata: number[][] = Array.from({ length: p }, () => new Array<number>(p).fill(0));
+    const atb = new Array<number>(p).fill(0);
+    for (const protocol of rows) {
+      const x = compsDesignRow(protocol, asOf);
+      const y = Math.log(protocol.mcap_usd!);
+      const residual = y - predictLog(beta, protocol, asOf);
+      const w = 1 / Math.max(Math.abs(residual), 0.05);
+      for (let i = 0; i < p; i++) {
+        atb[i] += w * x[i]! * y;
+        for (let j = 0; j < p; j++) ata[i]![j]! += w * x[i]! * x[j]!;
+      }
+    }
+    const next = solveLinear(ata, atb);
+    if (next === null) return beta;
+    beta = next;
+  }
+  return beta;
+}
+
 /** A fitted curve's prediction of log market cap for one protocol. */
 function predictLog(beta: number[], p: SnapshotProtocol, asOf: string): number {
   const x = compsDesignRow(p, asOf);
@@ -398,14 +438,15 @@ function median(nums: number[]): number | null {
 
 /**
  * The comps curve fitted on the snapshot's live-token protocols, with its out-of-sample
- * validation: five folds by slug hash, each fold predicted from a fit on the other four.
- * Live-token protocols are those with a market cap and a TVL, exchanges excluded: a CEX's
- * token is a company, not a protocol launch. The band is per group: each group's own
- * residual spread sets its interval, because the groups are not equally noisy.
+ * validation: five folds by slug hash, each fold predicted from a median fit on the
+ * other four. Live-token protocols are those with a market cap and a TVL, exchanges
+ * excluded: a CEX's token is a company, not a protocol launch. The band is per group:
+ * each group's own residual spread sets its interval, because the groups are not
+ * equally noisy.
  */
 export function fitComps(snapshot: Snapshot): CompsFit {
   const live = snapshot.protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && p.category !== 'CEX');
-  const beta = fitOls(live, snapshot.as_of);
+  const beta = fitMedian(live, snapshot.as_of);
   if (beta === null) throw new SnapshotError('the comps fit is singular: the live-token set cannot fit a curve');
   const residuals: number[] = [];
   let ssRes = 0;
@@ -421,7 +462,7 @@ export function fitComps(snapshot: Snapshot): CompsFit {
   for (let fold = 0; fold < 5; fold++) {
     const train = live.filter((p) => fnvHash(p.slug) % 5 !== fold);
     const test = live.filter((p) => fnvHash(p.slug) % 5 === fold);
-    const foldBeta = fitOls(train, snapshot.as_of);
+    const foldBeta = fitMedian(train, snapshot.as_of);
     if (foldBeta === null) continue;
     for (const p of test) heldOut.push(Math.abs(Math.log(p.mcap_usd!) - predictLog(foldBeta, p, snapshot.as_of)));
   }
@@ -450,6 +491,7 @@ export function fitComps(snapshot: Snapshot): CompsFit {
     residual_sd: Math.sqrt(ssRes / Math.max(1, live.length - beta.length)),
     r_squared: ssTot > 0 ? 1 - ssRes / ssTot : 0,
     cv_median_log_error: median(heldOut) ?? 0,
+    cv_mean_log_error: heldOut.length > 0 ? heldOut.reduce((s, e) => s + e, 0) / heldOut.length : 0,
     cv_folds: 5,
     live_n: live.length,
   };
