@@ -1,9 +1,9 @@
 // Token Radar's entrypoint (Node 22, standard library only).
 //
-// It loads the sealed DefiLlama snapshot, scores every pre-token protocol with the radar-3
-// model in lib/model.ts — a comps curve fitted on the snapshot's live-token protocols, validated
-// out of sample, with every farm plan netted to a farm, thin or skip verdict — and writes the
-// results into the output directory: the ranked board as board.json, the dashboard's dataset as
+// It loads the sealed DefiLlama snapshot, scores every pre-token protocol with the radar-5
+// model in lib/model.ts — a comps curve fitted by median regression on the snapshot's
+// live-token protocols, validated out of sample, with every farm plan netted to a farm,
+// thin or skip verdict — and writes the results into the output directory: the ranked board as board.json, the dashboard's dataset as
 // data.js, the dashboard/ page, the screenshots/ of it, and dossier.json, the summary the judge
 // reads, built with the vendored make.fun library.
 //
